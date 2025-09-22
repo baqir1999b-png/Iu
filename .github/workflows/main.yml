@@ -8,53 +8,117 @@ jobs:
     steps:
       - name: Configure Enhanced RDP Settings
         run: |
-          # تمكين RDP مع إعدادات محسنة
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          
-          # إعدادات إضافية للأداء
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "KeepAliveTimeout" -Value 1 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fInheritMaxIdleTime" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxIdleTime" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxDisconnectionTime" -Value 0 -Force
-          
-          # قواعد الجدار الناري
-          netsh advfirewall firewall delete rule name="RDP-Enhanced"
-          netsh advfirewall firewall add rule name="RDP-Enhanced" dir=in action=allow protocol=TCP localport=3389
-          
-          # إعادة تشغيل الخدمة
-          Restart-Service -Name TermService -Force
-          Write-Host "RDP configured successfully"
+          try {
+              Write-Host "🔧 Configuring RDP settings..."
+              
+              # تمكين RDP مع إعدادات محسنة
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+              
+              # إعدادات إضافية للأداء والاستقرار
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "KeepAliveTimeout" -Value 1 -Force
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fInheritMaxIdleTime" -Value 0 -Force
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxIdleTime" -Value 0 -Force
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxDisconnectionTime" -Value 0 -Force
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fResetBroken" -Value 0 -Force
+              
+              # قواعد الجدار الناري المحسنة
+              Write-Host "🛡️ Configuring firewall rules..."
+              netsh advfirewall firewall delete rule name="RDP-Enhanced" 2>$null
+              netsh advfirewall firewall add rule name="RDP-Enhanced" dir=in action=allow protocol=TCP localport=3389
+              netsh advfirewall firewall add rule name="RDP-Enhanced-UDP" dir=in action=allow protocol=UDP localport=3389
+              
+              # إعادة تشغيل خدمة RDP
+              Write-Host "🔄 Restarting RDP service..."
+              Restart-Service -Name TermService -Force
+              Start-Sleep -Seconds 3
+              
+              # التحقق من حالة الخدمة
+              $rdpService = Get-Service -Name TermService
+              if ($rdpService.Status -eq 'Running') {
+                  Write-Host "✅ RDP service is running successfully"
+              } else {
+                  throw "RDP service failed to start"
+              }
+              
+              Write-Host "✅ RDP configuration completed successfully"
+              
+          } catch {
+              Write-Error "❌ RDP configuration failed: $_"
+              exit 1
+          }
 
       - name: Create Administrator User
         run: |
-          $username = "Other"
-          $password = "Other123@"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          # إنشاء المستخدم إذا لم يكن موجوداً
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
-              Write-Host "User $username created successfully"
-          }
-          
-          # إضافة إلى مجموعات الإدارة
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Users" -Member $username -ErrorAction SilentlyContinue
-          
-          # حفظ بيانات الاعتماد
-          echo "RDP_USER=$username" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-          
-          # التحقق من إنشاء المستخدم
-          $user = Get-LocalUser -Name $username
-          if ($user) {
-              Write-Host "User verification successful - Full admin rights granted"
-          } else {
-              Write-Error "User creation failed"
-              exit 1
+          try {
+              $username = "Other"
+              $password = "Other123@"
+              
+              Write-Host "Creating user: $username"
+              
+              # إنشاء كلمة المرور الآمنة
+              $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+              
+              # حذف المستخدم إذا كان موجوداً مسبقاً
+              if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+                  Write-Host "User exists, removing first..."
+                  Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
+              }
+              
+              # إنشاء المستخدم الجديد
+              New-LocalUser -Name $username -Password $securePass -Description "RDP Admin User" -ErrorAction Stop
+              Write-Host "✅ User $username created successfully"
+              
+              # تعطيل انتهاء صلاحية كلمة المرور
+              Set-LocalUser -Name $username -PasswordNeverExpires $true -AccountNeverExpires -ErrorAction Stop
+              
+              # إضافة إلى مجموعات الإدارة
+              Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction Stop
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction Stop
+              Write-Host "✅ Admin rights granted successfully"
+              
+              # حفظ بيانات الاعتماد
+              echo "RDP_USER=$username" >> $env:GITHUB_ENV
+              echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+              
+              # التحقق النهائي
+              $user = Get-LocalUser -Name $username -ErrorAction Stop
+              $isAdmin = (Get-LocalGroupMember -Group "Administrators" | Where-Object {$_.Name -like "*$username*"}) -ne $null
+              
+              if ($user -and $isAdmin) {
+                  Write-Host "✅ User verification successful - Full admin rights confirmed"
+              } else {
+                  throw "User creation or admin rights assignment failed"
+              }
+              
+          } catch {
+              Write-Host "❌ Error creating user: $_"
+              
+              # محاولة بديلة بكلمة مرور أبسط
+              Write-Host "🔄 Trying alternative method..."
+              $altPassword = "Admin123"
+              $altSecurePass = ConvertTo-SecureString $altPassword -AsPlainText -Force
+              
+              try {
+                  if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+                      Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
+                  }
+                  
+                  New-LocalUser -Name $username -Password $altSecurePass -Description "RDP User" -ErrorAction Stop
+                  Set-LocalUser -Name $username -PasswordNeverExpires $true -ErrorAction Stop
+                  Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction Stop
+                  Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction Stop
+                  
+                  echo "RDP_USER=$username" >> $env:GITHUB_ENV
+                  echo "RDP_PASS=$altPassword" >> $env:GITHUB_ENV
+                  
+                  Write-Host "✅ Alternative method successful - Password: $altPassword"
+                  
+              } catch {
+                  Write-Error "❌ Both methods failed: $_"
+                  exit 1
+              }
           }
 
       - name: Install and Configure Tailscale
@@ -159,7 +223,7 @@ jobs:
           Write-Host "🌐 IP Address: $env:TAILSCALE_IP"
           Write-Host "👤 Username: $env:RDP_USER"
           Write-Host "🔑 Password: $env:RDP_PASS"
-          Write-Host "⏰ Session Duration: Up to 15 hours"
+          Write-Host "⏰ Session Duration: Up to 3 days (72 hours)"
           Write-Host "🛡️  Full Administrator Rights"
           Write-Host "=================================="
           Write-Host ""
