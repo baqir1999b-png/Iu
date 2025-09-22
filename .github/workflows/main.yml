@@ -1,0 +1,202 @@
+name: Enhanced RDP
+on:
+  workflow_dispatch:
+jobs:
+  extended-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 4320  # 3 أيام (72 ساعة)
+    steps:
+      - name: Configure Enhanced RDP Settings
+        run: |
+          # تمكين RDP مع إعدادات محسنة
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          # إعدادات إضافية للأداء
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "KeepAliveTimeout" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fInheritMaxIdleTime" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxIdleTime" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxDisconnectionTime" -Value 0 -Force
+          
+          # قواعد الجدار الناري
+          netsh advfirewall firewall delete rule name="RDP-Enhanced"
+          netsh advfirewall firewall add rule name="RDP-Enhanced" dir=in action=allow protocol=TCP localport=3389
+          
+          # إعادة تشغيل الخدمة
+          Restart-Service -Name TermService -Force
+          Write-Host "RDP configured successfully"
+
+      - name: Create Administrator User
+        run: |
+          $username = "Other"
+          $password = "Other123@"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # إنشاء المستخدم إذا لم يكن موجوداً
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+              Write-Host "User $username created successfully"
+          }
+          
+          # إضافة إلى مجموعات الإدارة
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Users" -Member $username -ErrorAction SilentlyContinue
+          
+          # حفظ بيانات الاعتماد
+          echo "RDP_USER=$username" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+          
+          # التحقق من إنشاء المستخدم
+          $user = Get-LocalUser -Name $username
+          if ($user) {
+              Write-Host "User verification successful - Full admin rights granted"
+          } else {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+      - name: Install and Configure Tailscale
+        run: |
+          try {
+              # تحميل وتثبيت Tailscale
+              $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+              $installerPath = "$env:TEMP\tailscale.msi"
+              
+              Write-Host "Downloading Tailscale..."
+              Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+              
+              Write-Host "Installing Tailscale..."
+              Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+              Remove-Item $installerPath -Force
+              
+              Write-Host "Tailscale installed successfully"
+          } catch {
+              Write-Error "Tailscale installation failed: $_"
+              exit 1
+          }
+
+      - name: Connect to Tailscale Network
+        run: |
+          try {
+              # الاتصال بشبكة Tailscale
+              $hostname = "gh-rdp-$(Get-Date -Format 'MMdd-HHmm')"
+              & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname --accept-routes
+              
+              # انتظار الحصول على IP
+              $tsIP = $null
+              $attempts = 0
+              $maxAttempts = 20
+              
+              Write-Host "Waiting for Tailscale IP assignment..."
+              while (-not $tsIP -and $attempts -lt $maxAttempts) {
+                  Start-Sleep -Seconds 3
+                  $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+                  $attempts++
+                  Write-Host "Attempt $attempts of $maxAttempts..."
+              }
+              
+              if (-not $tsIP) {
+                  Write-Error "Failed to get Tailscale IP after $maxAttempts attempts"
+                  exit 1
+              }
+              
+              echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+              Write-Host "Tailscale connected successfully - IP: $tsIP"
+          } catch {
+              Write-Error "Tailscale connection failed: $_"
+              exit 1
+          }
+
+      - name: System Performance Optimization
+        run: |
+          # تحسين الأداء
+          Write-Host "Optimizing system performance..."
+          
+          # إيقاف الخدمات غير الضرورية
+          $servicesToStop = @('Spooler', 'Fax', 'TabletInputService', 'WSearch')
+          foreach ($service in $servicesToStop) {
+              try {
+                  Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+                  Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+              } catch { }
+          }
+          
+          # تحسين ذاكرة التخزين المؤقت
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "LargeSystemCache" -Value 1
+          
+          Write-Host "System optimization completed"
+
+      - name: Verify RDP Connection
+        run: |
+          Write-Host "Verifying RDP connectivity..."
+          
+          # اختبار الاتصال
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+          
+          if ($testResult.TcpTestSucceeded) {
+              Write-Host "✅ RDP connection test successful!"
+          } else {
+              Write-Error "❌ RDP connection test failed"
+              exit 1
+          }
+          
+          # عرض معلومات النظام
+          $os = Get-CimInstance -ClassName Win32_OperatingSystem
+          $cpu = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
+          $ram = [math]::Round((Get-CimInstance -ClassName Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)
+          
+          Write-Host "`n=== SYSTEM INFO ==="
+          Write-Host "OS: $($os.Caption)"
+          Write-Host "CPU: $($cpu.Name)"
+          Write-Host "RAM: $ram GB"
+          Write-Host "==================="
+
+      - name: Keep RDP Session Active
+        run: |
+          Write-Host "`n🔥 === ENHANCED RDP ACCESS === 🔥"
+          Write-Host "🌐 IP Address: $env:TAILSCALE_IP"
+          Write-Host "👤 Username: $env:RDP_USER"
+          Write-Host "🔑 Password: $env:RDP_PASS"
+          Write-Host "⏰ Session Duration: Up to 15 hours"
+          Write-Host "🛡️  Full Administrator Rights"
+          Write-Host "=================================="
+          Write-Host ""
+          
+          # حلقة الحفاظ على الاتصال
+          $startTime = Get-Date
+          $sessionNumber = 1
+          
+          while ($true) {
+              $currentTime = Get-Date
+              $elapsed = $currentTime - $startTime
+              $elapsedHours = [math]::Round($elapsed.TotalHours, 2)
+              
+              # فحص حالة Tailscale
+              $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
+              $isConnected = $tsStatus.BackendState -eq "Running"
+              
+              $status = if ($isConnected) { "🟢 ACTIVE" } else { "🔴 DISCONNECTED" }
+              
+              Write-Host "[$sessionNumber] $(Get-Date -Format 'HH:mm:ss') | $status | Uptime: $elapsedHours hours"
+              
+              # إعادة الاتصال إذا انقطع
+              if (-not $isConnected) {
+                  Write-Host "🔄 Reconnecting to Tailscale..."
+                  & "$env:ProgramFiles\Tailscale\tailscale.exe" up
+                  Start-Sleep -Seconds 10
+              }
+              
+              # حفظ الملفات المؤقتة لمنع timeout
+              $tempFile = "$env:TEMP\rdp_keepalive_$sessionNumber.txt"
+              Set-Content -Path $tempFile -Value "Session active at $(Get-Date)"
+              
+              Start-Sleep -Seconds 300  # 5 دقائق
+              $sessionNumber++
+              
+              # تنظيف الملفات القديمة
+              if ($sessionNumber % 12 -eq 0) {  # كل ساعة
+                  Get-ChildItem "$env:TEMP\rdp_keepalive_*.txt" | Where-Object { $_.CreationTime -lt (Get-Date).AddHours(-2) } | Remove-Item -Force
+              }
+          }
